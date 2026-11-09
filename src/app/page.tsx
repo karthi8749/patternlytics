@@ -157,7 +157,8 @@ export default function Home() {
     setIsAnalyzing(true);
     setErrorMessage(null);
 
-    const activeKey = apiKey || (typeof window !== 'undefined' ? (localStorage.getItem('PATTERNLYTICS_GEMINI_KEY') || localStorage.getItem('CONFLUX_GEMINI_KEY')) : '') || '';
+    const rawKey = apiKey || (typeof window !== 'undefined' ? (localStorage.getItem('PATTERNLYTICS_GEMINI_KEY') || localStorage.getItem('CONFLUX_GEMINI_KEY')) : '') || '';
+    const activeKey = rawKey.trim();
 
     if (!activeKey) {
       setIsAnalyzing(false);
@@ -167,30 +168,12 @@ export default function Home() {
     }
 
     try {
-      // 1. Direct client-side analysis to Google Gemini (runs 100% on GitHub Pages & mobile!)
-      let analyzedData: TechnicalAnalysis | null = null;
-      try {
-        analyzedData = await analyzeChartDirectClient(
-          b64,
-          activeKey,
-          queryStr !== undefined ? queryStr : chartinkQuery
-        );
-      } catch (clientErr: any) {
-        console.warn("Direct Gemini client failed, trying API route fallback...", clientErr.message);
-        // Fallback to local /api/analyze if running in Node server environment
-        const res = await fetch('/api/analyze', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            imageBase64: b64,
-            chartinkQuery: queryStr !== undefined ? queryStr : chartinkQuery,
-            apiKey: activeKey,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || clientErr.message || 'Failed to analyze chart');
-        analyzedData = data.data;
-      }
+      // 100% Client-side direct analysis to Google Gemini (runs 24/7 on GitHub Pages & mobile!)
+      const analyzedData = await analyzeChartDirectClient(
+        b64,
+        activeKey,
+        queryStr !== undefined ? queryStr : chartinkQuery
+      );
 
       if (!analyzedData) throw new Error('Analysis yielded no results.');
 
@@ -205,7 +188,15 @@ export default function Home() {
         });
       }
     } catch (err: any) {
-      setErrorMessage(err.message || 'Something went wrong while analyzing.');
+      console.error("Gemini analysis error:", err);
+      const msg = err.message || 'Something went wrong while analyzing.';
+      // If error indicates an API key problem, open the key modal
+      if (msg.toLowerCase().includes('api key') || msg.includes('API_KEY') || msg.includes('403') || msg.includes('INVALID_ARGUMENT')) {
+        setShowKeyModal(true);
+        setErrorMessage(`${msg}. Please enter a valid Gemini API Key.`);
+      } else {
+        setErrorMessage(msg);
+      }
     } finally {
       setIsAnalyzing(false);
     }
@@ -538,8 +529,10 @@ export default function Home() {
               <div className="flex gap-2">
                 <button
                   onClick={() => {
-                    localStorage.setItem('PATTERNLYTICS_GEMINI_KEY', apiKey);
-                    localStorage.setItem('CONFLUX_GEMINI_KEY', apiKey);
+                    const clean = apiKey.trim();
+                    setApiKey(clean);
+                    localStorage.setItem('PATTERNLYTICS_GEMINI_KEY', clean);
+                    localStorage.setItem('CONFLUX_GEMINI_KEY', clean);
                     setShowKeyModal(false);
                     setErrorMessage(null);
                     if (imageBase64) {
