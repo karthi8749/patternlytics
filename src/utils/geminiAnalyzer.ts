@@ -109,9 +109,9 @@ export async function analyzeChartDirectClient(
 
   // Active production multimodal models in Google Gemini API
   const candidateModels = [
-    'gemini-2.0-flash',
-    'gemini-1.5-flash',
-    'gemini-1.5-pro',
+    'gemini-3.5-flash',
+    'gemini-3.8-flash',
+    'gemini-flash-lite-latest',
   ];
 
   const fullPrompt = `${PROMPT_TEMPLATE}\n\n${chartinkQuery ? `Context: "${chartinkQuery}"` : ''}`;
