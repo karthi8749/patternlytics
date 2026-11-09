@@ -1,38 +1,8 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { GoogleGenAI } from '@google/genai';
 import { TechnicalAnalysis } from '@/types/analysis';
 
-export async function POST(req: NextRequest) {
-  try {
-    const { imageBase64, mimeType, chartinkQuery, apiKey: userProvidedApiKey } = await req.json();
-
-    if (!imageBase64) {
-      return NextResponse.json({ error: 'Image data is required' }, { status: 400 });
-    }
-
-    // Use user-provided API key from UI settings or process.env
-    const apiKey = userProvidedApiKey || process.env.GEMINI_API_KEY;
-
-    if (!apiKey) {
-      return NextResponse.json(
-        {
-          error: 'Gemini API Key missing. Please provide your free Gemini API key in settings or in .env.local file.',
-          missingKey: true,
-        },
-        { status: 401 }
-      );
-    }
-
-    const ai = new GoogleGenAI({ apiKey });
-
-    // Clean base64 if it has prefix
-    const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
-
-    const prompt = `
+const PROMPT_TEMPLATE = `
 You are an expert Chief Technical Analyst and Quant Trader specializing in Indian Stock Market (NSE/BSE), Price Action, Candlestick Formations, Chart Patterns, and Chartink screeners.
-Analyze the provided stock chart image thoroughly. 
-
-${chartinkQuery ? `Context from User's Chartink Screener: "${chartinkQuery}"` : ''}
+Analyze the provided stock chart image thoroughly.
 
 Examine:
 1. Candlestick patterns (Doji, Hammer, Engulfing, Morning/Evening Star, Marubozu, Pinbars, etc.)
@@ -125,99 +95,68 @@ Respond ONLY with a valid JSON object matching the following structure without a
 }
 `;
 
-    // Models available in current Gemini API (fastest first)
-    const candidateModels = [
-      'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      'gemini-3.5-flash-lite',
-      'gemini-3.8-flash',
-      'gemini-3.5-flash',
-      'gemini-3-flash',
-    ];
+export async function analyzeChartDirectClient(
+  imageBase64: string,
+  apiKey: string,
+  chartinkQuery?: string
+): Promise<TechnicalAnalysis> {
+  const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+  const candidateModels = [
+    'gemini-2.5-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-3.8-flash',
+  ];
 
-    let response = null;
-    let lastError = null;
+  const fullPrompt = `${PROMPT_TEMPLATE}\n\n${chartinkQuery ? `Context: "${chartinkQuery}"` : ''}`;
 
-    for (const modelName of candidateModels) {
-      try {
-        const genConfig: any = {
-          responseMimeType: 'application/json',
-          temperature: 0.2,
-          thinkingConfig: { thinkingBudget: 0 },
-        };
+  let lastError: Error | null = null;
 
-        response = await ai.models.generateContent({
-          model: modelName,
+  for (const modelName of candidateModels) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           contents: [
             {
               role: 'user',
               parts: [
-                { text: prompt },
+                { text: fullPrompt },
                 {
                   inlineData: {
+                    mimeType: 'image/png',
                     data: cleanBase64,
-                    mimeType: mimeType || 'image/png',
                   },
                 },
               ],
             },
           ],
-          config: genConfig,
-        });
-        if (response?.text) {
-          break; // successfully got response
-        }
-      } catch (err: any) {
-        lastError = err;
-        console.warn(`Model ${modelName} with thinkingBudget:0 failed (${err.message}), trying fallback config...`);
-        try {
-          response = await ai.models.generateContent({
-            model: modelName,
-            contents: [
-              {
-                role: 'user',
-                parts: [
-                  { text: prompt },
-                  {
-                    inlineData: {
-                      data: cleanBase64,
-                      mimeType: mimeType || 'image/png',
-                    },
-                  },
-                ],
-              },
-            ],
-            config: {
-              responseMimeType: 'application/json',
-              temperature: 0.2,
-            },
-          });
-          if (response?.text) {
-            break;
-          }
-        } catch (retryErr: any) {
-          lastError = retryErr;
-          console.warn(`Model ${modelName} failed completely, trying next candidate...`, retryErr.message);
-        }
+          generationConfig: {
+            responseMimeType: 'application/json',
+            temperature: 0.2,
+          },
+        }),
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error?.message || `Model ${modelName} returned HTTP ${res.status}`);
       }
+
+      const json = await res.json();
+      const rawText = json.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!rawText) throw new Error('No analysis text generated');
+
+      // Strip markdown code fence if present
+      const cleanJson = rawText.replace(/^```json\s*/, '').replace(/```\s*$/, '').trim();
+      const parsed: TechnicalAnalysis = JSON.parse(cleanJson);
+      return parsed;
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`Model ${modelName} attempt failed (${err.message}), trying next candidate...`);
     }
-
-    if (!response || !response.text) {
-      throw lastError || new Error('All model candidates are currently busy. Please retry in a few moments.');
-    }
-
-    const responseText = response.text || '';
-    const parsedData: TechnicalAnalysis = JSON.parse(responseText);
-
-    return NextResponse.json({ success: true, data: parsedData });
-  } catch (error: any) {
-    console.error('Analysis error:', error);
-    return NextResponse.json(
-      {
-        error: error.message || 'Failed to analyze chart',
-        details: error.toString(),
-      },
-      { status: 500 }
-    );
   }
+
+  throw lastError || new Error('All Gemini models are currently busy. Please retry.');
 }

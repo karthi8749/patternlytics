@@ -23,6 +23,7 @@
 # misc
 .DS_Store
 *.pem
+src/api_backup/
 
 # debug
 npm-debug.log*

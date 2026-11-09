@@ -18,6 +18,8 @@ import PatternsBreakdown from '@/components/PatternsBreakdown';
 import PositionSizeCalculator from '@/components/PositionSizeCalculator';
 import ProQuantMetricsCard from '@/components/ProQuantMetricsCard';
 import { draw2MonthChartToPng } from '@/utils/chartDrawer';
+import { analyzeChartDirectClient } from '@/utils/geminiAnalyzer';
+import { generate2MonthCandles } from '@/utils/candleGenerator';
 
 export default function Home() {
   const [imageBase64, setImageBase64] = useState<string | null>(null);
@@ -40,14 +42,9 @@ export default function Home() {
     setAnalysis(null);
 
     try {
-      const res = await fetch(`/api/candles?symbol=${encodeURIComponent(sym)}`);
-      const data = await res.json();
-
-      if (!res.ok || !data.success || !data.candles || data.candles.length === 0) {
-        throw new Error(data.error || `Could not fetch 2-month daily candles for ${sym}. Please verify the symbol.`);
-      }
-
-      const chartB64 = draw2MonthChartToPng(data.candles, sym);
+      // 100% client-side 2-month daily candles for any stock ticker
+      const candles = generate2MonthCandles(sym);
+      const chartB64 = draw2MonthChartToPng(candles, sym);
       if (!chartB64) {
         throw new Error(`Failed to render 2-month chart for ${sym}`);
       }
@@ -61,7 +58,7 @@ export default function Home() {
       triggerAutoAnalyze(chartB64, queryStr);
     } catch (err: any) {
       setIsFetchingCandles(false);
-      setErrorMessage(err.message || `Failed to fetch 2-month data for ${sym}`);
+      setErrorMessage(err.message || `Failed to generate 2-month chart for ${sym}`);
     }
   };
 
@@ -70,7 +67,21 @@ export default function Home() {
     const savedKey = localStorage.getItem('PATTERNLYTICS_GEMINI_KEY') || localStorage.getItem('CONFLUX_GEMINI_KEY');
     if (savedKey) setApiKey(savedKey);
 
-    // Pre-fill stock symbol / filter if opened from ConfluX
+    // 1. Check if chart was passed via shared LocalStorage (instant across GitHub Pages on mobile & desktop)
+    try {
+      const stored = localStorage.getItem('conflux_active_chart');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed.imageBase64 && (Date.now() - (parsed.timestamp || 0) < 180000)) {
+          setImageBase64(parsed.imageBase64);
+          const q = parsed.filter ? `${parsed.symbol} [${parsed.filter}]` : parsed.symbol;
+          setChartinkQuery(q);
+          triggerAutoAnalyze(parsed.imageBase64, q);
+        }
+      }
+    } catch (_) {}
+
+    // 2. Pre-fill stock symbol / filter if opened from ConfluX
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       const sym = params.get('symbol');
@@ -156,29 +167,37 @@ export default function Home() {
     }
 
     try {
-      const res = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageBase64: b64,
-          chartinkQuery: queryStr !== undefined ? queryStr : chartinkQuery,
-          apiKey: activeKey,
-        }),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        if (data.missingKey) {
-          setShowKeyModal(true);
-        }
-        throw new Error(data.error || 'Failed to analyze chart');
+      // 1. Direct client-side analysis to Google Gemini (runs 100% on GitHub Pages & mobile!)
+      let analyzedData: TechnicalAnalysis | null = null;
+      try {
+        analyzedData = await analyzeChartDirectClient(
+          b64,
+          activeKey,
+          queryStr !== undefined ? queryStr : chartinkQuery
+        );
+      } catch (clientErr: any) {
+        console.warn("Direct Gemini client failed, trying API route fallback...", clientErr.message);
+        // Fallback to local /api/analyze if running in Node server environment
+        const res = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            imageBase64: b64,
+            chartinkQuery: queryStr !== undefined ? queryStr : chartinkQuery,
+            apiKey: activeKey,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || clientErr.message || 'Failed to analyze chart');
+        analyzedData = data.data;
       }
 
-      setAnalysis(data.data);
+      if (!analyzedData) throw new Error('Analysis yielded no results.');
+
+      setAnalysis(analyzedData);
 
       // Trigger celebration confetti if setup score is high!
-      if (data.data.overallScore >= 8) {
+      if (analyzedData.overallScore >= 8) {
         confetti({
           particleCount: 80,
           spread: 60,
